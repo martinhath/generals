@@ -20,7 +20,7 @@ enum Team {
     Red,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 enum Cell {
     Mountain,
     Open,
@@ -37,12 +37,6 @@ mod colors {
     pub fn blue() -> Color {
         Color::new(0.1, 0.1, 1.0, 1.0)
     }
-    pub fn red_light() -> Color {
-        Color::new(0.8, 0.1, 0.1, 1.0)
-    }
-    pub fn blue_light() -> Color {
-        Color::new(0.1, 0.1, 0.8, 1.0)
-    }
     pub fn black() -> Color {
         Color::new(0.0, 0.0, 0.0, 1.0)
     }
@@ -52,9 +46,6 @@ mod colors {
     pub fn red_overlay() -> Color {
         Color::new(1.0, 0.0, 0.0, 0.5)
     }
-    pub fn blue_overlay() -> Color {
-        Color::new(0.0, 0.0, 1.0, 0.5)
-    }
 }
 
 impl Cell {
@@ -63,11 +54,13 @@ impl Cell {
         match *self {
             Mountain => Color::new(0.2, 0.2, 0.2, 1.0),
             Open => Color::new(1.0, 1.0, 1.0, 1.0),
-            Fortress(_, _) => Color::new(0.5, 1.0, 0.3, 1.0),
-            King(Team::Red, _) => colors::red(),
-            King(Team::Blue, _) => colors::blue(),
-            Captured(Team::Red, _) => colors::red_light(),
-            Captured(Team::Blue, _) => colors::blue_light(),
+            Fortress(None, _) => Color::new(0.4, 0.4, 0.4, 1.0),
+            Captured(Team::Red, _) |
+            King(Team::Red, _) |
+            Fortress(Some(Team::Red), _) => colors::red(),
+            Captured(Team::Blue, _) |
+            King(Team::Blue, _) |
+            Fortress(Some(Team::Blue), _) => colors::blue(),
         }
     }
 
@@ -149,6 +142,14 @@ impl Board {
         self.cells[r_x][r_y] = Cell::King(Team::Red, 0);
         self.cells[b_x][b_y] = Cell::King(Team::Blue, 0);
     }
+
+    fn get(&self, x: i32, y: i32) -> &Cell {
+        &self.cells[y as usize][x as usize]
+    }
+
+    fn get_mut(&mut self, x: i32, y: i32) -> &mut Cell {
+        &mut self.cells[y as usize][x as usize]
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -177,6 +178,18 @@ impl Direction {
             Down => (0, 1),
             Left => (-1, 0),
             Right => (1, 0),
+        }
+    }
+
+    /// Returns the direction you would get to if you are at the given position, and go in `self`
+    /// direction. Clip at `0`, `w`, `h`.
+    fn from(&self, (x, y): (i32, i32), w: i32, h: i32) -> Option<(i32, i32)> {
+        use Direction::*;
+        match *self {
+            Up => if y == 0 { None } else { Some((x, y - 1)) },
+            Down => if y >= h - 1 { None } else { Some((x, y + 1)) },
+            Left => if x == 0 { None } else { Some((x - 1, y)) },
+            Right => if x >= w - 1 { None } else { Some((x + 1, y)) },
         }
     }
 }
@@ -237,16 +250,21 @@ impl MainState {
     fn tick(&mut self) {
         const ALL_UPDATE_INTERVAL: usize = 32;
         self.tick_number += 1;
+        let update_tick = self.tick_number % 2 == 0;
         let update_all = self.tick_number % ALL_UPDATE_INTERVAL == 0;
         for row in self.board.cells.iter_mut() {
             for cell in row.iter_mut() {
                 match *cell {
                     Cell::Fortress(Some(_), ref mut n) |
                     Cell::King(_, ref mut n) => {
-                        *n += 1;
+                        if update_tick {
+                            *n += 1;
+                        }
                     }
                     Cell::Captured(_, ref mut n) if update_all => {
-                        *n += 1;
+                        if update_tick {
+                            *n += 1;
+                        }
                     }
                     _ => {}
                 }
@@ -259,26 +277,65 @@ impl MainState {
                     if let Some((x, y)) = self.red_state.movement {
                         // TODO: clean up types here.
                         let (dx, dy) = dir.to_xy();
-                        let (old_x, old_y) = (x as usize, y as usize);
                         let (new_x, new_y) = (x + dx, y + dy);
-                        let units = self.board.cells[old_y][old_x].take_units();
+                        let mut units = self.board.get_mut(x, y).take_units();
                         if units == 0 {
                             self.red_state.focus = None;
                             self.red_state.movement = None;
                             self.red_state.moves.clear();
                             break;
                         }
-                        let new_cell = &mut self.board.cells[new_y as usize][new_x as usize];
 
-                        match new_cell {
+                        let mut did_capture = false;
+                        let mut return_units_and_break = false;
+                        match self.board.get_mut(new_x, new_y) {
                             &mut Cell::Mountain => {
+                                self.red_state.focus = None;
+                                self.red_state.movement = None;
                                 self.red_state.moves.clear();
-                                break;
+                                return_units_and_break = true;
                             }
-                            &mut Cell::Open => {
-                                *new_cell = Cell::Captured(Team::Red, units);
+                            c @ &mut Cell::Open => {
+                                *c = Cell::Captured(Team::Red, units);
                             }
-                            _ => unreachable!(),
+                            &mut Cell::Captured(Team::Red, ref mut n) |
+                            &mut Cell::King(Team::Red, ref mut n) |
+                            &mut Cell::Fortress(Some(Team::Red), ref mut n) => {
+                                *n += units;
+                            }
+                            &mut Cell::Captured(ref mut team, ref mut n) |
+                            &mut Cell::Fortress(Some(ref mut team), ref mut n) => {
+                                if *n >= units {
+                                    *n -= units;
+                                } else {
+                                    *team = Team::Red;
+                                    *n = units - *n;
+                                }
+                            }
+                            &mut Cell::King(_team, ref mut n) => {
+                                if *n >= units {
+                                    *n -= units;
+                                } else {
+                                    units -= *n - 1;
+                                    did_capture = true;
+                                }
+                            }
+                            &mut Cell::Fortress(ref mut team @ None, ref mut n) => {
+                                if *n >= units {
+                                    *n -= units;
+                                } else {
+                                    *team = Some(Team::Red);
+                                    *n = units - *n;
+                                }
+                            }
+                        }
+                        if return_units_and_break {
+                            self.board.get_mut(x, y).give_units(units);
+                            break;
+                        }
+                        if did_capture {
+                            *self.board.get_mut(new_x, new_y) =
+                                Cell::Fortress(Some(Team::Red), units);
                         }
                         self.red_state.movement = Some((new_x, new_y));
                     } else {
@@ -288,6 +345,10 @@ impl MainState {
                 }
             }
         }
+    }
+
+    fn dimens(&self) -> (i32, i32) {
+        (self.board.cells.len() as i32, self.board.cells.len() as i32)
     }
 }
 
@@ -303,6 +364,7 @@ impl event::EventHandler for MainState {
     }
 
     fn draw(&mut self, ctx: &mut Context) -> GameResult<()> {
+        let board_size = self.board.cells.len();
         graphics::clear(ctx);
         for (y, row) in self.board.cells.iter().enumerate() {
             for (x, cell) in row.iter().enumerate() {
@@ -352,21 +414,45 @@ impl event::EventHandler for MainState {
                     current_pos = Some((x + dx, y + dy));
                 }
             }
-            println!("{:?}", current_pos);
         }
         if let Some((x, y)) = self.red_state.focus {
-            let (x, y) = (
+            let (fx, fy) = (
                 x as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
                 y as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
             );
             let rect = Rect {
-                x,
-                y,
+                x: fx,
+                y: fy,
                 w: CELL_SIZE,
                 h: CELL_SIZE,
             };
             graphics::set_color(ctx, colors::red_overlay()).unwrap();
             graphics::rectangle(ctx, DrawMode::Fill, rect).unwrap();
+
+            let w = board_size as i32;
+            let h = board_size as i32;
+            for d in &[
+                Direction::Up,
+                Direction::Left,
+                Direction::Right,
+                Direction::Down,
+            ]
+            {
+                if let Some((x, y)) = d.from((x, y), w, h) {
+                    let (fx, fy) = (
+                        x as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
+                        y as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
+                    );
+                    let rect = Rect {
+                        x: fx,
+                        y: fy,
+                        w: CELL_SIZE,
+                        h: CELL_SIZE,
+                    };
+                    graphics::set_color(ctx, colors::black_overlay()).unwrap();
+                    graphics::rectangle(ctx, DrawMode::Fill, rect).unwrap();
+                }
+            }
         }
         graphics::present(ctx);
         Ok(())
@@ -376,9 +462,9 @@ impl event::EventHandler for MainState {
         if button != MouseButton::Left {
             return;
         }
-        let ix = (x / (CELL_SIZE + 1.0) as i32) as usize;
-        let iy = (y / (CELL_SIZE + 1.0) as i32) as usize;
-        let clicked_cell = &self.board.cells[iy][ix];
+        let ix = x / (CELL_SIZE + 1.0) as i32;
+        let iy = y / (CELL_SIZE + 1.0) as i32;
+        let clicked_cell = &self.board.get(ix, iy);
 
         // TODO: handle player state instead of red state.
         if clicked_cell.is_controlled_by(Team::Red) {
@@ -398,11 +484,16 @@ impl event::EventHandler for MainState {
             }
             Keycode::Up | Keycode::Down | Keycode::Left | Keycode::Right => {
                 let dir = Direction::from_keycode(keycode);
-                if let Some((ref x, ref y)) = self.red_state.focus {
-                    self.red_state.moves.push_back(Move::Movement(dir));
+                let (w, h) = self.dimens();
+                if let Some((ref mut x, ref mut y)) = self.red_state.focus {
                     let (dx, dy) = dir.to_xy();
-                    x.checked_add(dx);
-                    y.checked_add(dy);
+                    let nx = *x + dx;
+                    let ny = *y + dy;
+                    if nx >= 0 && nx < w && ny >= 0 && ny < h {
+                        self.red_state.moves.push_back(Move::Movement(dir));
+                        *x = nx;
+                        *y = ny;
+                    }
                 }
             }
             _ => {}
