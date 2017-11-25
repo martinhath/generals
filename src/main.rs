@@ -125,7 +125,7 @@ impl Board {
                 item: Cell::Mountain,
             },
             Weighted {
-                weight: 1,
+                weight: 3,
                 item: Cell::Fortress(None, 0),
             },
         ];
@@ -134,6 +134,12 @@ impl Board {
         for row in self.cells.iter_mut() {
             for cell in row.iter_mut() {
                 *cell = wc.ind_sample(&mut rng);
+                match *cell {
+                    Cell::Fortress(_, ref mut n) => {
+                        *n = rng.gen_range(40, 50);
+                    }
+                    _ => {}
+                }
             }
         }
         let n = self.cells.len();
@@ -163,10 +169,10 @@ enum Direction {
 impl Direction {
     fn from_keycode(keycode: Keycode) -> Self {
         match keycode {
-            Keycode::Up => Direction::Up,
-            Keycode::Down => Direction::Down,
-            Keycode::Left => Direction::Left,
-            Keycode::Right => Direction::Right,
+            Keycode::Up | Keycode::W => Direction::Up,
+            Keycode::Down | Keycode::S => Direction::Down,
+            Keycode::Left | Keycode::A => Direction::Left,
+            Keycode::Right | Keycode::D => Direction::Right,
             _ => panic!("Not a valid direction: {:?}", keycode),
         }
     }
@@ -482,7 +488,8 @@ impl event::EventHandler for MainState {
                 self.red_state.moves.clear();
                 self.red_state.movement = None;
             }
-            Keycode::Up | Keycode::Down | Keycode::Left | Keycode::Right => {
+            Keycode::Up | Keycode::Down | Keycode::Left | Keycode::Right | Keycode::W |
+            Keycode::A | Keycode::S | Keycode::D => {
                 let dir = Direction::from_keycode(keycode);
                 let (w, h) = self.dimens();
                 if let Some((ref mut x, ref mut y)) = self.red_state.focus {
