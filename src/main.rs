@@ -29,19 +29,24 @@ pub fn red_overlay() -> Color {
     Color::new(1.0, 0.0, 0.0, 0.5)
 }
 
+fn team_color(team: Team) -> Color {
+    match team {
+        0 => red(),
+        1 => blue(),
+        _ => panic!("Missing team color for team {}", team),
+    }
+}
+
 fn cell_color(cell: &Cell) -> Color {
     use generals::Cell::*;
-    use generals::Team;
     match *cell {
         Mountain => Color::new(0.2, 0.2, 0.2, 1.0),
         Open => Color::new(1.0, 1.0, 1.0, 1.0),
         Fortress(None, _) => Color::new(0.4, 0.4, 0.4, 1.0),
-        Captured(Team::Red, _) |
-        King(Team::Red, _) |
-        Fortress(Some(Team::Red), _) => red(),
-        Captured(Team::Blue, _) |
-        King(Team::Blue, _) |
-        Fortress(Some(Team::Blue), _) => blue(),
+
+        Captured(team, _) |
+        King(team, _) |
+        Fortress(Some(team), _) => team_color(team),
     }
 }
 
@@ -62,26 +67,27 @@ struct MainState {
     last_tick: Duration,
     tick_interval: Duration,
 
-    current_team: usize,
+    team: usize,
     focus: Option<Position>
 }
 
 impl MainState {
     fn new(_ctx: &mut Context) -> GameResult<MainState> {
+        let num_players = 2;
         let mut board = Board::empty(32);
-        board.randomize();
+        board.randomize(num_players);
         Ok(MainState {
             font: graphics::Font::default_font().unwrap(),
             time: Duration::new(0, 0),
             last_tick: Duration::new(0, 0),
             tick_interval: Duration::new(0, 500_000_000),
-            current_team: 0,
+            team: 0,
             focus: None,
             game: GameState {
                 board,
                 tick_number: 0,
                 num_players: 2,
-                player_states: vec![PlayerState::new(), PlayerState::new()],
+                player_states: (0..num_players).map(PlayerState::new).collect(),
                 dimens: (32, 32),
             },
         })
@@ -133,34 +139,27 @@ impl event::EventHandler for MainState {
             }
         }
 
-        let player_state = self.game.player_states[self.current_team];
+        let player_state = &self.game.player_states[self.team];
         // Draw queued line
-        let mut current_pos = player_state.movement;
         graphics::set_color(ctx, black()).unwrap();
-        for m in player_state.moves.iter() {
-            match *m {
-                Move::Focus(coords) => current_pos = Some(coords),
-                Move::Movement(dir) => {
-                    let (x, y) = current_pos.unwrap();
-                    let (dx, dy) = dir.to_xy();
-                    let points = [
-                        Point {
-                            x: x as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
-                            y: y as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
-                        },
-                        Point {
-                            x: (x + dx) as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
-                            y: (y + dy) as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
-                        },
-                    ];
-                    graphics::line(ctx, &points).unwrap();
-                    current_pos = Some((x + dx, y + dy));
-                }
-            }
+        for &(from_pos, dir) in player_state.moves.iter() {
+            let Position(x, y) = from_pos;
+            let (dx, dy) = dir.to_xy();
+            let points = [
+                Point {
+                    x: x as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
+                    y: y as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
+                },
+                Point {
+                    x: (x + dx) as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
+                    y: (y + dy) as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
+                },
+            ];
+            graphics::line(ctx, &points).unwrap();
         }
 
         // Draw focus shade stuff
-        if let Some((x, y)) = player_state.focus {
+        if let Some(Position(x, y)) = self.focus {
             let (fx, fy) = (
                 x as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
                 y as f32 * (CELL_SIZE + 1.0) + CELL_SIZE / 2.0,
@@ -210,26 +209,30 @@ impl event::EventHandler for MainState {
         }
         let ix = x / (CELL_SIZE + 1.0) as i32;
         let iy = y / (CELL_SIZE + 1.0) as i32;
-        self.game.focus((ix, iy), self.current_team);
+        if let Some(cell) = self.game.board.try_get(ix, iy) {
+            if cell.is_controlled_by(self.team) {
+                self.focus = Some(Position(ix, iy));
+            }
+        }
     }
 
     fn key_down_event(&mut self, keycode: Keycode, _keymod: Mod, _repeat: bool) {
         match keycode {
             Keycode::Q => {
-                self.game.reset_player_focus(self.current_team);
+                self.game.player_mut(self.team).moves.clear();
             }
             Keycode::Up | Keycode::Down | Keycode::Left | Keycode::Right | Keycode::W |
             Keycode::A | Keycode::S | Keycode::D => {
                 let dir = direction_from_keycode(keycode);
                 let (w, h) = self.dimens();
-                if let Some((ref mut x, ref mut y)) = self.game.player_states[self.current_team].focus {
+                if let Some(ref mut pos) = self.focus {
+                    let Position(x, y) = *pos;
                     let (dx, dy) = dir.to_xy();
-                    let nx = *x + dx;
-                    let ny = *y + dy;
+                    let nx = x + dx;
+                    let ny = y + dy;
                     if nx >= 0 && nx < w && ny >= 0 && ny < h {
-                        self.game.player_states[self.current_team].moves.push_back(Move::Movement(dir));
-                        *x = nx;
-                        *y = ny;
+                        self.game.player_mut(self.team).moves.push_back((*pos, dir));
+                        *pos = Position(nx, ny);
                     }
                 }
             }

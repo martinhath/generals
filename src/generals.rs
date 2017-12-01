@@ -10,15 +10,12 @@ pub struct GameState {
     pub dimens: (i32, i32),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Team {
-    Blue,
-    Red,
-}
+pub type Team = usize;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Cell {
     Mountain,
+    // TODO: make `Open(usize)`, and have it always be zero?
     Open,
     Fortress(Option<Team>, usize),
     King(Team, usize),
@@ -33,15 +30,19 @@ pub enum Direction {
     Right,
 }
 
+/// A movement, from a position in a direction.
 pub type Move = (Position, Direction);
 
 pub struct PlayerState {
     /// The Move queue.
     pub moves: VecDeque<Move>,
     pub dead: bool,
+    pub team: Team,
 }
 
-pub type Position = (i32, i32);
+
+#[derive(Clone, Copy)]
+pub struct Position(pub i32, pub i32);
 
 #[derive(Debug)]
 pub struct Board {
@@ -94,7 +95,7 @@ impl Board {
         Board { cells }
     }
 
-    pub fn randomize(&mut self) {
+    pub fn randomize(&mut self, num_players: usize) {
         let mut rng = rand::thread_rng();
         let mut items = [
             Weighted {
@@ -124,10 +125,10 @@ impl Board {
             }
         }
         let n = self.cells.len();
-        let (r_x, r_y) = (rng.gen_range(0, n), rng.gen_range(0, n));
-        let (b_x, b_y) = (rng.gen_range(0, n), rng.gen_range(0, n));
-        self.cells[r_x][r_y] = Cell::King(Team::Red, 0);
-        self.cells[b_x][b_y] = Cell::King(Team::Blue, 0);
+        for team in 0..num_players {
+            let (x, y) = (rng.gen_range(0, n), rng.gen_range(0, n));
+            self.cells[x][y] = Cell::King(team, 1);
+        }
     }
 
     pub fn cells(&self) -> &Vec<Vec<Cell>> {
@@ -136,6 +137,10 @@ impl Board {
 
     pub fn get(&self, x: i32, y: i32) -> &Cell {
         &self.cells[y as usize][x as usize]
+    }
+
+    pub fn try_get(&self, x: i32, y: i32) -> Option<&Cell> {
+        self.cells.get(y as usize).and_then(|r| r.get(x as usize))
     }
 
     pub fn get_mut(&mut self, x: i32, y: i32) -> &mut Cell {
@@ -168,15 +173,12 @@ impl Direction {
 }
 
 impl PlayerState {
-    pub fn new() -> Self {
+    pub fn new(team: Team) -> Self {
         Self {
             moves: VecDeque::new(),
             dead: false,
+            team,
         }
-    }
-
-    pub fn clear_movement_queue(&mut self) {
-        self.moves.clear();
     }
 }
 
@@ -208,56 +210,65 @@ impl GameState {
                 }
             }
         }
-        'asd: for player_state in self.player_states.iter_mut() {
+        for player_state in self.player_states.iter_mut() {
+            let team = player_state.team;
             if let Some((from, dir)) = player_state.moves.pop_front() {
-                let (x, y) = from;
-
+                let Position(x, y) = from;
                 let (dx, dy) = dir.to_xy();
                 let (new_x, new_y) = (x + dx, y + dy);
                 let mut units = self.board.get_mut(x, y).take_units();
                 if units == 0 {
                     player_state.moves.clear();
-                    continue 'asd;
+                    continue;
                 }
 
                 let mut did_capture = false;
                 let mut return_units_and_break = false;
-                match self.board.get_mut(new_x, new_y) {
-                    &mut Cell::Mountain => {
-                        player_state.moves.clear();
-                        return_units_and_break = true;
-                    }
-                    c @ &mut Cell::Open => {
-                        *c = Cell::Captured(Team::Red, units);
-                    }
-                    &mut Cell::Captured(Team::Red, ref mut n) |
-                    &mut Cell::King(Team::Red, ref mut n) |
-                    &mut Cell::Fortress(Some(Team::Red), ref mut n) => {
-                        *n += units;
-                    }
-                    &mut Cell::Captured(ref mut team, ref mut n) |
-                    &mut Cell::Fortress(Some(ref mut team), ref mut n) => {
-                        if *n >= units {
-                            *n -= units;
-                        } else {
-                            *team = Team::Red;
-                            *n = units - *n;
-                        }
-                    }
-                    &mut Cell::King(_team, ref mut n) => {
-                        if *n >= units {
-                            *n -= units;
-                        } else {
-                            units -= *n - 1;
-                            did_capture = true;
-                        }
-                    }
-                    &mut Cell::Fortress(ref mut team @ None, ref mut n) => {
-                        if *n >= units {
-                            *n -= units;
-                        } else {
-                            *team = Some(Team::Red);
-                            *n = units - *n;
+                // Possible scenarios:
+                //  We move units from our cell to another of our cells:
+                //      - Simply move over the units.
+                //  We move units from our cell to a neutral cell:
+                //      - If the neutral cell is Open, replace it with `Captured(n - 1)`.
+                //      - If the neutral cell is Fortress, eat from it.
+
+                {
+                    let target_cell = self.board.get_mut(new_x, new_y);
+                    if target_cell.is_controlled_by(team) {
+                        target_cell.give_units(units);
+                    } else {
+                        match target_cell {
+                            &mut Cell::Mountain => {
+                                player_state.moves.clear();
+                                return_units_and_break = true;
+                            }
+                            cell @ &mut Cell::Open => {
+                                *cell = Cell::Captured(team, units);
+                            }
+                            &mut Cell::Captured(ref mut team, ref mut n) |
+                            &mut Cell::Fortress(Some(ref mut team), ref mut n) => {
+                                if *n >= units {
+                                    *n -= units;
+                                } else {
+                                    *team = player_state.team;
+                                    *n = units - *n;
+                                }
+                            }
+                            &mut Cell::King(_team, ref mut n) => {
+                                if *n >= units {
+                                    *n -= units;
+                                } else {
+                                    units -= *n - 1;
+                                    did_capture = true;
+                                }
+                            }
+                            &mut Cell::Fortress(ref mut team @ None, ref mut n) => {
+                                if *n >= units {
+                                    *n -= units;
+                                } else {
+                                    *team = Some(player_state.team);
+                                    *n = units - *n;
+                                }
+                            }
                         }
                     }
                 }
@@ -266,9 +277,18 @@ impl GameState {
                     break;
                 }
                 if did_capture {
-                    *self.board.get_mut(new_x, new_y) = Cell::Fortress(Some(Team::Red), units);
+                    *self.board.get_mut(new_x, new_y) =
+                        Cell::Fortress(Some(player_state.team), units);
                 }
             }
         }
+    }
+}
+
+impl ::std::ops::Add<Direction> for Position {
+    type Output = Position;
+    fn add(self, dir: Direction) -> Self {
+        let (x, y) = dir.to_xy();
+        Position(self.0 + x, self.1 + y)
     }
 }
